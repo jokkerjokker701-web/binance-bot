@@ -1,0 +1,18 @@
+{"type": "START", "symbol": "BTCUSDT", "interval": "15m", "balance": 500.0, "learner": "state/learner_state.json", "arm_status": "state/arm_status.json", "trades": "state/trades.csv", "max_drawdown": 0.05, "dd_risk_mult": 0.5, "risk_mult_min": 0.25, "risk_mult_max": 1.25, "_ts": "2026-03-02T21:16:25.123399"}
+{"type": "BAR", "close_ts": 1772486999999, "price": 69236.5, "regime": "TREND", "picked_arm": "EMA_A", "picked_kind": "EMA", "signal": "HOLD", "balance": 500.0, "daily_pnl": 0.0, "adx": 33.83, "atr": 350.71, "risk_mult": 1.0, "defensive": false, "_ts": "2026-03-02T21:16:28.528769"}
+{"type": "ERROR", "msg": "[WinError 10054] An existing connection was forcibly closed by the remote host", "_ts": "2026-03-02T21:20:30.331239"}
+Traceback (most recent call last):
+  File "C:\Users\Javohir\Desktop\binance_bot\main.py", line 357, in <module>
+    main()
+  File "C:\Users\Javohir\Desktop\binance_bot\main.py", line 216, in main
+    time.sleep(cfg.loop_seconds)
+KeyboardInterrupt
+^C{"type": "START", "symbol": "BTCUSDT", "interval": "15m", "balance": 500.0, "learner": "state/learner_state.json", "arm_status": "state/arm_status.json", "trades": "state/trades.csv", "max_drawdown": 0.05, "dd_risk_mult": 0.5, "risk_mult_min": 0.25, "risk_mult_max": 1.25, "_ts": "2026-03-02T21:21:37.403176"}
+{"type": "BAR", "close_ts": 1772486999999, "price": 69159.8, "regime": "TREND", "picked_arm": "EMA_D", "picked_kind": "EMA", "signal": "HOLD", "balance": 500.0, "daily_pnl": 0.0, "adx": 33.83, "atr": 354.33, "risk_mult": 1.0, "defensive": false, "_ts": "2026-03-02T21:21:38.905157"}
+Traceback (most recent call last):
+  File "C:\Users\Javohir\Desktop\binance_bot\main.py", line 357, in <module>
+    main()
+  File "C:\Users\Javohir\Desktop\binance_bot\main.py", line 216, in main
+    time.sleep(cfg.loop_seconds)
+KeyboardInterrupt
+^C
