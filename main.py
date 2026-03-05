@@ -100,7 +100,7 @@ def _signal_ema_cross_compat(df: pd.DataFrame, fast: int, slow: int, cfg: Config
     if n <= 3:
         return signal_ema_cross(df, fast, slow)
 
-    adx_min = float(getattr(cfg, "adx_min", getattr(cfg, "adx_trend", 22.0)))
+    adx_min = float(getattr(cfg, "adx_min", getattr(cfg, "adx_trend", 18.0)))
     atr_period = int(getattr(cfg, "atr_period", 14))
     adx_period = int(getattr(cfg, "adx_period", 14))
     return signal_ema_cross(df, fast, slow, adx_min, atr_period, adx_period)
@@ -171,7 +171,7 @@ def compute_global_bias(df_ht: pd.DataFrame, cfg: Config) -> Tuple[str, float, f
     ht_adx_v = float(ht_adx) if ht_adx is not None else 0.0
 
     ms_lookback = int(getattr(cfg, "ms_lookback", 20))
-    ms_break_pct = float(getattr(cfg, "ms_break_pct", 0.001))
+    ms_break_pct = float(getattr(cfg, "ms_break_pct", 0.007))
 
     ht_ms = "NEUTRAL"
     if len(close) >= ms_lookback + 2:
@@ -445,7 +445,7 @@ def main() -> None:
     max_stopouts_per_day = int(getattr(cfg, "max_stopouts_per_day", 3))
     max_daily_loss_usd = float(getattr(cfg, "max_daily_loss_usd", 15.0))
     max_daily_drawdown = float(getattr(cfg, "max_daily_drawdown", 0.05))
-    vol_kill_atr_mult = float(getattr(cfg, "vol_kill_atr_mult", 2.8))
+    vol_kill_atr_mult = float(getattr(cfg, "vol_kill_atr_mult", 3.2))
 
     # arm guard params
     arm_disable_loss_streak = int(getattr(cfg, "arm_disable_loss_streak", 4))
@@ -466,7 +466,7 @@ def main() -> None:
     max_consecutive_losses_cfg = int(getattr(cfg, "max_consecutive_losses", 3))
 
     loop_seconds = float(getattr(cfg, "loop_seconds", 30))
-    cooldown_seconds = float(getattr(cfg, "cooldown_seconds", 60))
+    cooldown_seconds = float(getattr(cfg, "cooldown_seconds", 30))
 
     tg_send(
         "🟢 BOT ONLINE\n"
@@ -547,8 +547,8 @@ def main() -> None:
                 df,
                 int(getattr(cfg, "atr_ma_period", 50)),
                 int(getattr(cfg, "adx_period", 14)),
-                float(getattr(cfg, "atr_vol_mult", 1.8)),
-                float(getattr(cfg, "adx_trend", 22.0)),
+                float(getattr(cfg, "atr_vol_mult", 2.0)),
+                float(getattr(cfg, "adx_trend", 18.0)),
             )
             regime = str(regime)
 

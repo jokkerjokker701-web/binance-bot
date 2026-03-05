@@ -7,80 +7,63 @@ from typing import Optional
 
 import requests
 
-# .env ni lokalda o‘qish uchun (serverda bo‘lmasligi mumkin — normal)
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv()
-except Exception:
-    pass
+
+def _env(name: str) -> str:
+    return (os.getenv(name) or "").strip()
 
 
-_last_env_log_ts = 0.0
-
-
-def _get_env(name: str) -> Optional[str]:
-    v = os.getenv(name)
-    if v is None:
-        return None
-    v = v.strip()
-    return v if v else None
-
-
-def tg_env_ok() -> tuple[bool, bool]:
-    token_ok = bool(_get_env("TG_BOT_TOKEN"))
-    chat_ok = bool(_get_env("TG_CHAT_ID"))
-    return token_ok, chat_ok
-
-
-def tg_debug_env(force: bool = False) -> None:
+def tg_debug_env(force: bool = False) -> dict:
     """
-    Tokenni chiqarmaydi. Faqat bor/yo‘qligini ko‘rsatadi.
+    Environment'da TG_BOT_TOKEN va TG_CHAT_ID bor-yo'qligini tekshiradi.
+    main.py ichida tg_debug_env(force=True) chaqirilsa ham xato bermaydi.
     """
-    global _last_env_log_ts
-    now = time.time()
-    if (not force) and (now - _last_env_log_ts) < 120:
-        return
-    _last_env_log_ts = now
+    token = _env("TG_BOT_TOKEN")
+    chat_id = _env("TG_CHAT_ID")
 
-    token_ok, chat_ok = tg_env_ok()
-    print(f"[TG] env check: token_ok={token_ok} chat_ok={chat_ok}", flush=True)
+    info = {
+        "has_token": bool(token),
+        "has_chat": bool(chat_id),
+        "token_prefix": (token[:10] + "…") if token else "",
+        "chat_id": chat_id,
+        "cwd": os.getcwd(),
+    }
+
+    if force or (not info["has_token"] or not info["has_chat"]):
+        print(info, flush=True)
+
+    return info
 
 
-def tg_send(text: str, *, silent_fail: bool = True) -> bool:
+def tg_send(text: str, *, timeout: int = 15, retries: int = 2) -> bool:
     """
     Telegramga xabar yuboradi.
-    - silent_fail=True bo‘lsa: token/chat bo‘lmasa crash qilmaydi, log yozib False qaytaradi.
+    .env localda ishlaydi. Serverda esa Environment Variables orqali ishlaydi.
     """
-    # har safar env reload (lokalda .env o‘zgarsa ham)
-    try:
-        from dotenv import load_dotenv  # type: ignore
-        load_dotenv()
-    except Exception:
-        pass
-
-    token = _get_env("TG_BOT_TOKEN")
-    chat_id = _get_env("TG_CHAT_ID")
+    token = _env("TG_BOT_TOKEN")
+    chat_id = _env("TG_CHAT_ID")
 
     if not token or not chat_id:
-        tg_debug_env(force=True)
-        msg = "[TG] TG_BOT_TOKEN yoki TG_CHAT_ID yo'q (serverda Variables qo'yilmagan bo'lishi mumkin)."
-        print(msg, flush=True)
-        return False if silent_fail else (_raise(msg))
+        print("[TG] Missing TG_BOT_TOKEN or TG_CHAT_ID in environment (.env).", flush=True)
+        return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
 
-    try:
-        r = requests.post(url, json=payload, timeout=15)
-        if not r.ok:
-            # tokenni chiqarmaymiz, faqat status + response text
-            print(f"[TG] send failed: {r.status_code} {r.text}", flush=True)
-            return False if silent_fail else (_raise(f"TG send failed: {r.status_code}"))
-        return True
-    except Exception as e:
-        print(f"[TG] send exception: {e}", flush=True)
-        return False if silent_fail else (_raise(str(e)))
+    last_err: Optional[str] = None
+    for _ in range(max(1, retries + 1)):
+        try:
+            r = requests.post(url, json=payload, timeout=timeout)
+            if r.ok:
+                return True
+            last_err = f"{r.status_code} {r.text}"
+        except Exception as e:
+            last_err = str(e)
 
+        time.sleep(1)
 
-def _raise(msg: str) -> bool:
-    raise RuntimeError(msg)
+    print(f"[TG] Failed to send: {last_err}", flush=True)
+    return False
