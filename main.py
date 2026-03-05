@@ -9,8 +9,10 @@ from typing import Optional, Dict, Any, Tuple, List, Set
 
 import pandas as pd
 
+# .env ni yuklash (localda ham, serverda ham)
 try:
     from dotenv import load_dotenv  # type: ignore
+
     load_dotenv()
 except Exception:
     pass
@@ -29,11 +31,10 @@ from core.strategy import (
     signal_vol_breakout,
 )
 
-from core.risk import position_size
+from core.risk import position_size, risk_ok
 from core.execution import Position, open_position, check_close, pnl_usd
 from core.storage import append_trade_csv
-from core.telegram import tg_send
-
+from core.telegram import tg_send, tg_debug_env
 from core.discipline import DisciplineState
 from core.journal import append_jsonl, classify_outcome
 from core.arm_guard import ArmGuard
@@ -73,6 +74,9 @@ def _ema(series: pd.Series, period: int) -> pd.Series:
 
 
 def _call_compat(func, *args):
+    """
+    func signature o'zgarsa ham, kerakli argumentlar soniga qarab chaqiradi.
+    """
     try:
         n = len(inspect.signature(func).parameters)
         return func(*args[:n])
@@ -80,7 +84,14 @@ def _call_compat(func, *args):
         return func(*args)
 
 
+# -------------------- strategy compat --------------------
+
 def _signal_ema_cross_compat(df: pd.DataFrame, fast: int, slow: int, cfg: Config) -> str:
+    """
+    signal_ema_cross ba'zida 3 ta arg (df, fast, slow),
+    ba'zida 6 ta arg bo'lishi mumkin edi.
+    Hozir sendagi loglarga ko'ra 3 ta bo'lishi mumkin, shuni ham ko'taramiz.
+    """
     try:
         n = len(inspect.signature(signal_ema_cross).parameters)
     except Exception:
@@ -95,30 +106,51 @@ def _signal_ema_cross_compat(df: pd.DataFrame, fast: int, slow: int, cfg: Config
     return signal_ema_cross(df, fast, slow, adx_min, atr_period, adx_period)
 
 
-def call_position_size_compat(cfg: Config, *, balance: float, price: float, risk_pct: float, atr: float, sl_mult: float) -> float:
-    lev = int(getattr(cfg, "leverage", 3))
+def _open_position_compat(
+    *,
+    side: str,
+    entry: float,
+    atr: float,
+    qty: float,
+    sl_mult: float,
+    tp_mult: float,
+    regime: str,
+    arm: str,
+    kind: str,
+    maker_fee: float,
+    taker_fee: float,
+    fee_mode: str,
+    slippage_bps: float,
+) -> Position:
+    """
+    execution.open_position signature har xil bo'lishi mumkin.
+    Shuning uchun faqat mavjud paramlarni yuboramiz.
+    """
+    kwargs = dict(
+        side=side,
+        entry=entry,
+        atr=atr,
+        qty=qty,
+        sl_mult=sl_mult,
+        tp_mult=tp_mult,
+        regime=regime,
+        arm=arm,
+        kind=kind,
+        maker_fee=maker_fee,
+        taker_fee=taker_fee,
+        fee_mode=fee_mode,
+        slippage_bps=slippage_bps,
+    )
     try:
-        params = list(inspect.signature(position_size).parameters.keys())
+        params = set(inspect.signature(open_position).parameters.keys())
+        clean = {k: v for k, v in kwargs.items() if k in params}
+        return open_position(**clean)
     except Exception:
+        # fallback: eski signature bo'lsa ham ishlasin
         try:
-            return float(position_size(balance, price, risk_pct, atr, sl_mult, lev))
-        except TypeError:
-            return float(position_size(balance, price, risk_pct, atr, sl_mult))
-
-    if "balance" in params:
-        kwargs = {}
-        if "balance" in params: kwargs["balance"] = balance
-        if "price" in params: kwargs["price"] = price
-        if "risk_pct" in params: kwargs["risk_pct"] = risk_pct
-        if "atr" in params: kwargs["atr"] = atr
-        if "sl_mult" in params: kwargs["sl_mult"] = sl_mult
-        if "leverage" in params: kwargs["leverage"] = lev
-        return float(position_size(**kwargs))
-
-    try:
-        return float(position_size(balance, price, risk_pct, atr, sl_mult, lev))
-    except TypeError:
-        return float(position_size(balance, price, risk_pct, atr, sl_mult))
+            return open_position(side, entry, atr, qty, sl_mult, tp_mult, regime, arm, kind)
+        except Exception:
+            return open_position(side=side, entry=entry, atr=atr, qty=qty, sl_mult=sl_mult, tp_mult=tp_mult, regime=regime, arm=arm, kind=kind)
 
 
 # -------------------- global bias (HTF) --------------------
@@ -264,7 +296,9 @@ def policy_fallback_arm(regime: str, global_bias: str, arms: List[Arm], guard: A
     return None
 
 
-def pick_arm_fund_style(learner: RegimeBandit, regime: str, global_bias: str, arms: List[Arm], guard: ArmGuard) -> Tuple[Arm, bool, Optional[str]]:
+def pick_arm_fund_style(
+    learner: RegimeBandit, regime: str, global_bias: str, arms: List[Arm], guard: ArmGuard
+) -> Tuple[Arm, bool, Optional[str]]:
     allow = allowed_kinds_for(regime, global_bias)
     arm = learner.pick(regime)
 
@@ -288,9 +322,17 @@ def pick_arm_fund_style(learner: RegimeBandit, regime: str, global_bias: str, ar
     return arm, False, None
 
 
-# -------------------- confidence + dynamic slippage --------------------
+# -------------------- confidence + slippage --------------------
 
-def compute_confidence(sig: str, regime: str, global_bias: str, global_score: float, adx: Optional[float], atr: Optional[float], atr_ma: float) -> float:
+def compute_confidence(
+    sig: str,
+    regime: str,
+    global_bias: str,
+    global_score: float,
+    adx: Optional[float],
+    atr: Optional[float],
+    atr_ma: float,
+) -> float:
     if sig not in ("LONG", "SHORT"):
         return 0.0
 
@@ -333,10 +375,6 @@ def confidence_risk_multiplier(conf: float, min_mult: float, max_mult: float) ->
 
 
 def dynamic_slippage_bps(base_bps: float, atr: Optional[float], atr_ma: float, vol_kill: bool) -> float:
-    """
-    ATR/ATR_MA ratio bo‘yicha slippage oshadi.
-    Vol juda yuqori bo‘lsa slippage ko‘proq.
-    """
     if atr is None or atr_ma <= 0:
         return float(base_bps)
 
@@ -356,12 +394,6 @@ def dynamic_slippage_bps(base_bps: float, atr: Optional[float], atr_ma: float, v
 
 
 def fee_mode_for(regime: str, arm_kind: str) -> str:
-    """
-    Paperda:
-      - TREND breakout = taker (tez kirish)
-      - RANGE mean reversion = maker (limit)
-      - EMA = taker default
-    """
     if arm_kind == "MEAN_REV":
         return "maker"
     if arm_kind == "TREND_BRK":
@@ -382,6 +414,7 @@ class RuntimeState:
 
 def main() -> None:
     cfg = Config()
+    tg_debug_env(force=True)
     arms = build_arms(cfg)
 
     # paths
@@ -426,6 +459,11 @@ def main() -> None:
     # confidence risk shaping
     conf_risk_min_mult = float(getattr(cfg, "conf_risk_min_mult", 0.6))
     conf_risk_max_mult = float(getattr(cfg, "conf_risk_max_mult", 1.35))
+
+    # old risk limits (risk.py risk_ok bilan mos)
+    start_balance_cfg = float(getattr(cfg, "start_balance", st.balance))
+    max_daily_loss_cfg = float(getattr(cfg, "max_daily_loss", max_daily_loss_usd))  # agar cfg.da max_daily_loss bo'lsa
+    max_consecutive_losses_cfg = int(getattr(cfg, "max_consecutive_losses", 3))
 
     loop_seconds = float(getattr(cfg, "loop_seconds", 30))
     cooldown_seconds = float(getattr(cfg, "cooldown_seconds", 60))
@@ -492,6 +530,7 @@ def main() -> None:
             atr_v = safe_float(df["atr"].iloc[-1]) if "atr" in df.columns else None
             adx_v = safe_float(df["adx"].iloc[-1]) if "adx" in df.columns else None
 
+            # ATR MA (vol kill)
             atr_ma_period = int(getattr(cfg, "atr_ma_period", 50))
             atr_ma = 0.0
             if "atr" in df.columns and len(df) >= atr_ma_period:
@@ -502,6 +541,7 @@ def main() -> None:
             if atr_v is not None and atr_ma > 0:
                 vol_kill = float(atr_v) > atr_ma * vol_kill_atr_mult
 
+            # Regime (signature compat)
             regime = _call_compat(
                 detect_regime,
                 df,
@@ -512,6 +552,7 @@ def main() -> None:
             )
             regime = str(regime)
 
+            # Global bias (HTF)
             ht_interval = getattr(cfg, "ht_interval", "1h")
             ms_lookback = int(getattr(cfg, "ms_lookback", 20))
             df_ht = fetch_klines(symbol, ht_interval, max(400, ms_lookback + 60))
@@ -520,34 +561,35 @@ def main() -> None:
             else:
                 global_bias, global_score, ht_adx, ht_ms = compute_global_bias(df_ht, cfg)
 
+            # Pick arm with fund policy + guard
             arm, overridden, override_reason = pick_arm_fund_style(learner, regime, global_bias, arms, guard)
             if overridden:
-                log({"type": "POLICY_OVERRIDE", "regime": regime, "global_bias": global_bias, "arm": arm.name, "kind": arm.kind, "override_reason": override_reason})
+                log(
+                    {
+                        "type": "POLICY_OVERRIDE",
+                        "regime": regime,
+                        "global_bias": global_bias,
+                        "arm": arm.name,
+                        "kind": arm.kind,
+                        "override_reason": override_reason,
+                    }
+                )
 
             sig = choose_signal(df, arm, cfg)
 
             # ✅ TREND secondary entry (AUTOMATIC)
             if regime == "TREND" and sig == "HOLD":
-                if global_bias == "LONG_ONLY":
+                if global_bias in ("LONG_ONLY", "SHORT_ONLY"):
                     s2 = _signal_ema_cross_compat(df, 9, 21, cfg)
-                    if s2 == "LONG":
+                    if (global_bias == "LONG_ONLY" and s2 == "LONG") or (global_bias == "SHORT_ONLY" and s2 == "SHORT"):
                         for a in arms:
                             if a.name == "EMA_A" and not guard.is_disabled(a.name):
                                 arm = a
-                                sig = "LONG"
-                                log({"type": "SECONDARY_ENTRY", "reason": "TREND_HOLD->EMA", "arm": arm.name})
-                                break
-                elif global_bias == "SHORT_ONLY":
-                    s2 = _signal_ema_cross_compat(df, 9, 21, cfg)
-                    if s2 == "SHORT":
-                        for a in arms:
-                            if a.name == "EMA_A" and not guard.is_disabled(a.name):
-                                arm = a
-                                sig = "SHORT"
-                                log({"type": "SECONDARY_ENTRY", "reason": "TREND_HOLD->EMA", "arm": arm.name})
+                                sig = s2
+                                log({"type": "SECONDARY_ENTRY", "reason": "TREND_HOLD->EMA_A", "arm": arm.name, "sig": sig})
                                 break
 
-            # global direction filter
+            # Global direction filter
             if sig == "LONG" and global_bias == "SHORT_ONLY":
                 sig = "HOLD"
             if sig == "SHORT" and global_bias == "LONG_ONLY":
@@ -576,7 +618,7 @@ def main() -> None:
                             pullback_ok = False
                             sig = "HOLD"
 
-            # discipline
+            # discipline + cooldown
             cooldown_ok = (time.time() - st.last_trade_ts) >= cooldown_seconds
             disc.update_equity(st.balance)
             allowed, block_reason = disc.can_trade(
@@ -591,11 +633,20 @@ def main() -> None:
                 sig = "HOLD"
                 log({"type": "BLOCK", "reason": block_reason, "stop_today": disc.stop_today})
 
-            # confidence + risk
+            # risk_ok (risk.py bilan mos) - qo'shimcha xavfsizlik
+            # consecutive_losses ni DisciplineState ichidan ololmasak, 0 qo'yamiz
+            consecutive_losses = int(getattr(disc, "consecutive_losses", 0))
+            if not risk_ok(float(disc.daily_pnl), start_balance_cfg, max_daily_loss_cfg, consecutive_losses, max_consecutive_losses_cfg):
+                sig = "HOLD"
+                disc.stop_today = True
+                log({"type": "RISK_STOP", "reason": "risk_ok", "daily_pnl": disc.daily_pnl, "consecutive_losses": consecutive_losses})
+                tg_send("⛔️ RISK STOP: kunlik limit yoki ketma-ket loss limitga yetdi.")
+
+            # confidence + risk multiplier
             conf = compute_confidence(sig, regime, global_bias, float(global_score), adx_v, atr_v, float(atr_ma))
             conf_mult = confidence_risk_multiplier(conf, conf_risk_min_mult, conf_risk_max_mult)
 
-            # dynamic slippage (NEW)
+            # dynamic slippage
             slip_bps = dynamic_slippage_bps(base_slip_bps, atr_v, float(atr_ma), vol_kill)
 
             log(
@@ -637,10 +688,12 @@ def main() -> None:
                 was_stopout = pnl < 0
                 disc.on_close(pnl=pnl, was_stopout=was_stopout)
 
+                # reward normalize (risk proxy)
                 risk_proxy = 1.0
-                if atr_v is not None and pos.qty is not None:
+                if atr_v is not None and getattr(pos, "qty", None) is not None:
                     risk_proxy = max(1.0, float(atr_v) * float(pos.qty))
                 reward = float(pnl) / float(risk_proxy)
+
                 learner.update(regime=pos.regime, arm_name=pos.arm, reward=reward)
 
                 disabled_now, disable_reason = guard.on_close(
@@ -651,7 +704,7 @@ def main() -> None:
                 )
                 if disabled_now:
                     sec = guard.disabled_for_seconds(pos.arm)
-                    log({"type": "ARM_DISABLED", "arm": pos.arm, "reason": disable_reason, "disabled_hours": round(sec/3600, 2)})
+                    log({"type": "ARM_DISABLED", "arm": pos.arm, "reason": disable_reason, "disabled_hours": round(sec / 3600, 2)})
                     tg_send(f"⛔️ ARM DISABLED: {pos.arm}\nReason: {disable_reason}\nFor: {sec/3600:.1f} hours")
                     append_jsonl(journal_path, {"event": "ARM_DISABLED", "arm": pos.arm, "reason": disable_reason, "disabled_for_sec": sec})
 
@@ -666,15 +719,12 @@ def main() -> None:
                         "arm": pos.arm,
                         "kind": pos.kind,
                         "entry": pos.entry,
-                        "exit": pos.exit_exec or price,
+                        "exit": getattr(pos, "exit_exec", None) or price,
                         "qty": pos.qty,
                         "sl": pos.sl,
                         "tp": pos.tp,
                         "pnl": pnl,
                         "balance": st.balance,
-                        "fees": getattr(pos, "fees_paid", 0.0),
-                        "maker_fee": getattr(pos, "maker_fee", maker_fee),
-                        "taker_fee": getattr(pos, "taker_fee", taker_fee),
                         "fee_mode": getattr(pos, "fee_mode", "taker"),
                         "slip_bps": getattr(pos, "slippage_bps", slip_bps),
                     },
@@ -685,9 +735,8 @@ def main() -> None:
 
                 tg_send(
                     "✅ CLOSE\n"
-                    f"Side: {pos.side}\nEntry(exec): {pos.entry:.2f}\nExit(exec): {(pos.exit_exec or price):.2f}\n"
-                    f"PnL(net): {pnl:.2f}\nBal: {st.balance:.2f}\n"
-                    f"FeeMode: {getattr(pos,'fee_mode','taker')} | Slip(bps): {getattr(pos,'slippage_bps',slip_bps)}\n"
+                    f"Side: {pos.side}\nEntry: {pos.entry:.2f}\nExit: {(getattr(pos, 'exit_exec', None) or price):.2f}\n"
+                    f"PnL: {pnl:.2f}\nBal: {st.balance:.2f}\n"
                     f"Tag: {outcome_tag}"
                 )
                 log({"type": "CLOSE", "pnl": round(pnl, 2), "balance": round(st.balance, 2), "reward": round(reward, 6), "tag": outcome_tag})
@@ -700,19 +749,15 @@ def main() -> None:
                 base_risk = float(getattr(cfg, "risk_per_trade", 0.005))
                 risk_used = clamp(base_risk * conf_mult, 0.0001, 0.02)
 
-                qty = call_position_size_compat(
-                    cfg,
-                    balance=float(st.balance),
-                    price=float(price),
-                    risk_pct=float(risk_used),
-                    atr=float(atr_v),
-                    sl_mult=float(arm.params["sl"]),
-                )
+                # ✅ risk.py GA MOS: position_size(start_balance, risk_per_trade, sl_distance)
+                # sl_distance = ATR * sl_mult
+                sl_distance = float(atr_v) * float(arm.params["sl"])
+                qty = float(position_size(float(st.balance), float(risk_used), float(sl_distance)))
 
                 if qty > 0:
                     fee_mode = fee_mode_for(regime, arm.kind)
 
-                    pos = open_position(
+                    pos = _open_position_compat(
                         side=sig,
                         entry=float(price),
                         atr=float(atr_v),
@@ -737,7 +782,7 @@ def main() -> None:
                         "🚀 OPEN\n"
                         f"Side: {pos.side}\nRegime: {regime} | Global: {global_bias}\n"
                         f"Arm: {arm.name} ({arm.kind})\n"
-                        f"Entry(exec): {pos.entry:.2f}\nSL: {pos.sl:.2f}\nTP: {pos.tp:.2f}\n"
+                        f"Entry: {pos.entry:.2f}\nSL: {pos.sl:.2f}\nTP: {pos.tp:.2f}\n"
                         f"Qty: {pos.qty:.6f}\nRiskUsed: {risk_used:.4f} | Conf: {conf:.2f}\n"
                         f"FeeMode: {fee_mode} | Slip(bps): {slip_bps:.2f}\n"
                         f"Bal: {st.balance:.2f}"
